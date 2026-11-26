@@ -1,0 +1,9 @@
+Local backend verification
+==========================
+PASS: Python compileall for project files
+PASS: test_auth_and_isolation (registration, login, hashed credentials, role checks, isolation, saved activity CRUD)
+PASS: test_demo_chat (offline interview and three career recommendations)
+PASS: test_resume_review_evaluation (actual PDF extraction, demo rubric analysis, reviewer restrictions, saved reviews, manual scoring, demo exclusion)
+PASS: separate local logical AI quota smoke test
+
+Not run: Streamlit browser UI, real Gemini requests, real PostgreSQL connection or import, cloud deployment. These require the corresponding installed dependencies, credentials, and services. No research results are fabricated or included.

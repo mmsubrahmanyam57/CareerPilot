@@ -1,5 +1,9 @@
 @echo off
 cd /d "%~dp0"
-call venv\Scripts\activate.bat
-python -m streamlit run app.py
+if not exist "venv\Scripts\python.exe" (
+  echo Virtual environment missing. Follow README setup first.
+  pause
+  exit /b 1
+)
+venv\Scripts\python.exe -m streamlit run app.py
 pause

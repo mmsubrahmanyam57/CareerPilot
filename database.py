@@ -89,23 +89,21 @@ def _now() -> str:
 
 
 @contextmanager
-def _connect() -> Iterator[sqlite3.Connection]:
-    path = get_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    try:
-        if str(path) not in _initialised_paths:
-            conn.executescript(SCHEMA)
-            _initialised_paths.add(str(path))
+def _connect():
+    from storage import connect, workspace
+    scope = workspace.get()
+    if scope is None:
+        raise PermissionError("No authorized database workspace")
+    with connect(scope, SCHEMA) as conn:
         yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+
+
+def _actor(*roles):
+    from accounts import principal
+    actor=principal.get()
+    if not actor or actor['role'] not in roles:
+        raise PermissionError('Operation not allowed for this role')
+    return actor
 
 
 def init_db() -> None:
@@ -116,6 +114,12 @@ def init_db() -> None:
 
 # --------------------------------------------------------------------------- resumes
 def register_resume(resume_id: str, label: str) -> None:
+    actor=_actor('student','reviewer')
+    if actor['role']=='reviewer':
+        with _connect() as conn:
+            if not conn.execute('SELECT resume_id FROM resumes WHERE resume_id=?',(resume_id,)).fetchone():
+                raise PermissionError('Review must match a saved resume')
+        return
     label = (label or "").strip() or f"Resume-{resume_id[:6]}"
     with _connect() as conn:
         conn.execute(
@@ -126,6 +130,10 @@ def register_resume(resume_id: str, label: str) -> None:
 
 
 def list_resumes() -> list[dict[str, Any]]:
+    actor=_actor('student','reviewer','admin')
+    if actor['role']=='reviewer':
+        with _connect() as conn:
+            return [dict(row) for row in conn.execute('SELECT resume_id, label, created_at FROM resumes ORDER BY created_at DESC')]
     sql = """
     SELECT r.resume_id, r.label, r.created_at,
            a.mode AS ai_mode, a.model AS ai_model,
@@ -138,6 +146,7 @@ def list_resumes() -> list[dict[str, Any]]:
 
 
 def delete_resume_data(resume_id: str) -> None:
+    _actor("student","admin")
     with _connect() as conn:
         conn.execute("DELETE FROM resumes WHERE resume_id = ?", (resume_id,))
 
@@ -145,6 +154,7 @@ def delete_resume_data(resume_id: str) -> None:
 # --------------------------------------------------------------------------- AI reviews
 def save_ai_review(resume_id: str, label: str, model: str, mode: str,
                    total_score: float, result: dict[str, Any]) -> None:
+    _actor("student")
     register_resume(resume_id, label)
     with _connect() as conn:
         conn.execute(
@@ -158,6 +168,7 @@ def save_ai_review(resume_id: str, label: str, model: str, mode: str,
 
 
 def get_ai_review(resume_id: str) -> dict[str, Any] | None:
+    _actor("student","admin")
     with _connect() as conn:
         row = conn.execute("SELECT * FROM ai_reviews WHERE resume_id = ?", (resume_id,)).fetchone()
     if row is None:
@@ -171,6 +182,8 @@ def get_ai_review(resume_id: str) -> dict[str, Any] | None:
 def add_human_review(resume_id: str, label: str, reviewer: str, section: str, line_no: int,
                      page: int | None, line_text: str | None, feedback: str,
                      explanation: str, suggested_rewrite: str) -> int:
+    actor=_actor('reviewer')
+    reviewer=actor['id']
     register_resume(resume_id, label)
     with _connect() as conn:
         cur = conn.execute(
@@ -183,6 +196,8 @@ def add_human_review(resume_id: str, label: str, reviewer: str, section: str, li
 
 
 def list_human_reviews(resume_id: str, reviewer: str | None = None) -> list[dict[str, Any]]:
+    actor=_actor("student","reviewer","admin")
+    if actor["role"]=="reviewer": reviewer=actor["id"]
     sql = "SELECT * FROM human_reviews WHERE resume_id = ?"
     params: list[Any] = [resume_id]
     if reviewer:
@@ -194,6 +209,7 @@ def list_human_reviews(resume_id: str, reviewer: str | None = None) -> list[dict
 
 
 def list_reviewers(resume_id: str) -> list[str]:
+    _actor("admin","student")
     with _connect() as conn:
         rows = conn.execute(
             "SELECT DISTINCT reviewer FROM human_reviews WHERE resume_id = ? ORDER BY reviewer",
@@ -203,13 +219,16 @@ def list_reviewers(resume_id: str) -> list[str]:
 
 
 def delete_human_review(review_id: int) -> None:
+    actor=_actor("reviewer")
     with _connect() as conn:
-        conn.execute("DELETE FROM human_reviews WHERE id = ?", (review_id,))
+        conn.execute("DELETE FROM human_reviews WHERE id = ? AND reviewer = ?", (review_id,actor["id"]))
 
 
 # --------------------------------------------------------------------------- evaluations
 def save_evaluation(resume_id: str, source: str, reviewer: str, evaluator: str,
                     scores: dict[str, int], notes: str = "", ai_mode: str | None = None) -> None:
+    actor=_actor("admin")
+    evaluator=actor["id"]
     if source not in ("ai", "human"):
         raise ValueError("source must be 'ai' or 'human'")
     values = [int(scores[c]) for c in CRITERIA_COLUMNS]
@@ -230,6 +249,7 @@ def save_evaluation(resume_id: str, source: str, reviewer: str, evaluator: str,
 
 
 def list_evaluations() -> list[dict[str, Any]]:
+    _actor("admin","student")
     sql = ("SELECT e.*, r.label FROM evaluations e JOIN resumes r ON r.resume_id = e.resume_id "
            "ORDER BY e.created_at DESC, e.id DESC")
     with _connect() as conn:
@@ -237,12 +257,14 @@ def list_evaluations() -> list[dict[str, Any]]:
 
 
 def delete_evaluation(evaluation_id: int) -> None:
+    _actor("admin")
     with _connect() as conn:
         conn.execute("DELETE FROM evaluations WHERE id = ?", (evaluation_id,))
 
 
 # --------------------------------------------------------------------------- admin
 def counts() -> dict[str, int]:
+    _actor("admin","student")
     with _connect() as conn:
         return {
             "resumes": conn.execute("SELECT COUNT(*) FROM resumes").fetchone()[0],
@@ -253,6 +275,7 @@ def counts() -> dict[str, int]:
 
 
 def clear_all() -> None:
+    _actor("admin")
     with _connect() as conn:
         for table in ("evaluations", "human_reviews", "ai_reviews", "resumes"):
             conn.execute(f"DELETE FROM {table}")

@@ -1,8 +1,5 @@
 # Secrets
 .env
-.env.*
-!.env.example
-.streamlit/secrets.toml
 
 # Python
 venv/
@@ -10,20 +7,25 @@ venv/
 __pycache__/
 *.pyc
 
-# Database
+# Local data (may contain review feedback)
 data/
 *.db
-*.sqlite
 *.sqlite3
-*.db-wal
-*.db-shm
 
-# Private resumes and logs
+# Uploaded resumes must never be committed
 *.pdf
-*.log
 
-# Editors
+# Editors / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*.sqlite
+*.db-wal
+*.db-shm
+*.log
+.pytest_cache/
+*.zip

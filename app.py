@@ -9,6 +9,7 @@ import hashlib
 import html
 import json
 import re
+import os
 
 import pandas as pd
 import plotly.express as px
@@ -16,6 +17,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import database as db
+import accounts
+import tools_ui as tools
+from auth_ui import login_gate, signout, STYLE, DARK
 import evaluation as ev
 from ai_service import AIService, AIServiceError, get_api_key, get_default_model
 from career_chatbot import CareerChatbot
@@ -26,6 +30,8 @@ st.set_page_config(page_title="CareerPilot - Career Guidance & Resume Feedback",
                    layout="wide", initial_sidebar_state="expanded")
 
 PAGES = ["🏠 Home", "💬 Career Guidance", "📄 Resume Analyzer", "🧑‍🏫 Human Review", "📊 AI vs Human Comparison"]
+
+EXTRA = ["ATS Checker", "Job Matcher", "Skill Gap", "Learning Roadmap", "Mock Interview", "Resume Builder", "Learning Resources", "My Profile", "My History"]
 
 CSS = """
 <style>
@@ -75,7 +81,9 @@ def init_state() -> None:
 
 
 def get_ai() -> AIService:
-    return AIService(model=st.session_state.model, demo_mode=st.session_state.demo_mode)
+    actor=accounts.principal.get()
+    guard=(lambda: accounts.consume_ai_quota(actor)) if actor and actor["role"]=="student" else None
+    return AIService(model=st.session_state.model, demo_mode=st.session_state.demo_mode, request_guard=guard)
 
 
 def goto(page: str) -> None:
@@ -107,18 +115,23 @@ def gauge(score: float, max_score: float, title: str) -> go.Figure:
 
 
 # ----------------------------------------------------------------------------- sidebar
-def sidebar() -> str:
+def sidebar(actor, pages) -> str:
     with st.sidebar:
         st.markdown("<div class='side-brand'>🎓 <b>CareerPilot</b><br><span>Career guidance &amp; resume feedback</span></div>",
                     unsafe_allow_html=True)
-        page = st.radio("Navigation", PAGES, key="nav", label_visibility="collapsed")
+        st.write(actor["name"] + " · " + actor["role"].title())
+        if st.button("Sign out", use_container_width=True): signout()
+        st.toggle("Dark appearance", key="dark_ui")
+        if st.session_state.get("dark_ui"): st.markdown(DARK, unsafe_allow_html=True)
+        if st.session_state.nav not in pages: st.session_state.nav = pages[0]
+        page = st.radio("Navigation", pages, key="nav", label_visibility="collapsed")
         st.divider()
         has_key = bool(get_api_key())
         st.toggle("Offline demo mode (simulated)", key="demo_mode", disabled=not has_key,
                   help="Runs without calling Gemini. All output is simulated and labelled as such.")
         if not has_key:
             st.caption("GEMINI_API_KEY not found in .env, so demo mode is forced.")
-        st.text_input("Gemini model", key="model", help="Any model name your API key can use, e.g. gemini-2.5-flash.")
+        st.text_input("Gemini model", key="model", disabled=os.getenv("APP_ENV","").lower()=="production", help="Any model name your API key can use, e.g. gemini-2.5-flash.")
         st.checkbox("Store original line excerpts in database", key="store_excerpts",
                     help="Off by default. When off, only line numbers, feedback and rewrites are saved.")
         ai = get_ai()
@@ -131,10 +144,6 @@ def sidebar() -> str:
                        "session. The database holds an anonymous resume ID, scores and feedback you choose to save.")
             if st.session_state.resume is not None:
                 st.button("Remove resume from this session", on_click=clear_resume, key="sb_clear_resume")
-            confirm = st.checkbox("I want to delete ALL saved database records", key="confirm_wipe")
-            if st.button("Delete database records", disabled=not confirm, key="wipe_db"):
-                db.clear_all()
-                st.success("All saved records were deleted.")
     return page
 
 
@@ -144,31 +153,23 @@ def clear_resume() -> None:
 
 
 # ----------------------------------------------------------------------------- home
-def page_home() -> None:
-    hero("Career Guidance &amp; Resume Feedback Chatbot",
-         "Discover suitable careers, get line-by-line resume feedback, and compare AI with human reviewers.")
+def page_home(actor, pages):
+    hero("Your career starts here", "A personal workspace to discover opportunities, improve your resume and build job-ready skills.")
     mode_banner(get_ai())
-    cards = [("💬 Career Guidance", "A one-question-at-a-time interview that ends in three career paths, skill gaps and a learning roadmap.", PAGES[1]),
-             ("📄 Resume Analyzer", "Upload a PDF resume and get a 100-point rubric score with verified, line-level feedback and rewrites.", PAGES[2]),
-             ("🧑‍🏫 Human Review", "Reviewers independently annotate the same resume. Results are saved in SQLite.", PAGES[3]),
-             ("📊 AI vs Human", "Score both on five criteria (0-2 each), compare across resumes and export CSV.", PAGES[4])]
-    for col, (title, text, target) in zip(st.columns(4), cards):
-        with col:
-            st.markdown(f"<div class='card'><h4>{title}</h4><p>{text}</p></div>", unsafe_allow_html=True)
-            st.button("Open", key=f"open_{target}", on_click=goto, args=(target,))
-    st.write("")
     stats = db.counts()
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Resumes in database", stats["resumes"])
-    m2.metric("AI reviews saved", stats["ai_reviews"])
-    m3.metric("Human feedback items", stats["human_reviews"])
-    m4.metric("Evaluations scored", stats["evaluations"])
-    st.subheader("How the study workflow runs")
-    st.markdown("1. **Analyze** a resume (Resume Analyzer) and save the AI feedback.\n"
-                "2. **Review** the same resume independently (Human Review). The reviewer does not see the AI output.\n"
-                "3. **Score** both feedback sets manually on five criteria (AI vs Human Comparison).\n"
-                "4. **Aggregate** results over several resumes and export CSV.")
-    st.info("Evaluation scores are never generated automatically. If the database holds no scores, the charts stay empty.")
+    for col, (label, value) in zip(st.columns(4), [("Resumes",stats['resumes']), ("AI reviews",stats['ai_reviews']), ("Human feedback",stats['human_reviews']), ("Evaluations",stats['evaluations'])]):
+        col.metric(label,value)
+    if actor["role"]=="student":
+        saved=accounts.activities(actor)
+        for col,kind in zip(st.columns(3),["Career guidance","Interview","Roadmap"]): col.metric(kind+" saved",sum(r["kind"]==kind for r in saved))
+    st.subheader("Explore your workspace")
+    options=[p for p in pages if p!=PAGES[0]]
+    for i in range(0,len(options),3):
+        for col,target in zip(st.columns(3),options[i:i+3]):
+            with col, st.container(border=True):
+                st.subheader(target)
+                st.button("Open tool",key="open_"+target,on_click=goto,args=(target,),use_container_width=True)
+    st.caption("All counts come from the current database workspace.")
 
 
 # ----------------------------------------------------------------------------- career guidance
@@ -207,7 +208,7 @@ def render_recommendations(rec: dict) -> None:
                     st.write("\n".join(f"- {a}" for a in phase["actions"]))
 
 
-def page_career() -> None:
+def page_career(actor) -> None:
     hero("Career Guidance Chatbot", "Answer one question at a time. After the interview you get three career paths and a roadmap.")
     ai = get_ai()
     mode_banner(ai)
@@ -234,7 +235,7 @@ def page_career() -> None:
 
     for message in chat["messages"]:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            st.markdown(esc_md(message["content"]))
 
     if answered >= 3 and chat["recommendations"] is None:
         label = "✨ Generate my career recommendations" if answered >= total else "✨ Generate recommendations now (early)"
@@ -244,6 +245,8 @@ def page_career() -> None:
                     bot.recommend(chat)
             except (AIServiceError, ValueError) as exc:
                 st.error(str(exc))
+    if chat["answers"] and st.button("Save conversation and recommendations"):
+        tools.save(actor,"Career guidance","Career interview",chat,("demo" if chat["recommendations"].get("simulated") else "gemini") if chat["recommendations"] else "conversation")
     if chat["recommendations"]:
         render_recommendations(chat["recommendations"])
         d1, d2 = st.columns(2)
@@ -362,7 +365,7 @@ def render_analysis(result: dict, resume: dict) -> None:
             db.save_ai_review(result["resume_id"], label, result["model"], result["mode"], result["total_score"], payload)
             st.success("Saved. Resume text was not stored" + ("" if st.session_state.store_excerpts else ", and line excerpts were left out") + ".")
         except Exception as exc:  # noqa: BLE001
-            st.error(f"Could not save to the database: {exc}")
+            st.error("Could not save to the database. Check configuration.")
 
 
 def page_analyzer() -> None:
@@ -393,12 +396,15 @@ def page_human() -> None:
     if resume is None:
         st.info("Upload the same PDF resume the AI analyzed (or any resume you want to review).")
         return
+    if resume["resume_id"] not in {r["resume_id"] for r in db.list_resumes()}:
+        st.error("This PDF does not match a saved resume in the selected workspace."); return
     lines = resume["lines"]
     with st.expander("📃 Resume text with page and line numbers", expanded=True):
         show_lines(resume, "human_filter")
 
     st.subheader("Add review feedback")
-    reviewer = st.text_input("Reviewer name or ID *", key="reviewer_name", max_chars=40)
+    reviewer = st.session_state["auth_uid"]
+    st.caption("Review attributed to your authenticated reviewer ID.")
     line_no = st.number_input("Line number (0 = general feedback)", min_value=0, max_value=len(lines), value=0, step=1,
                               key=f"human_line_no_{resume['resume_id']}")
     selected = lines[int(line_no) - 1] if line_no > 0 else None
@@ -424,10 +430,10 @@ def page_human() -> None:
                                     feedback, explanation, rewrite)
                 st.success("Review item saved.")
             except Exception as exc:  # noqa: BLE001
-                st.error(f"Could not save: {exc}")
+                st.error("Could not save review. Check database configuration.")
 
     st.subheader("Saved review items for this resume")
-    rows = db.list_human_reviews(resume["resume_id"])
+    rows = db.list_human_reviews(resume["resume_id"], reviewer=reviewer)
     if not rows:
         st.info("No human feedback saved yet.")
         return
@@ -499,7 +505,8 @@ def tab_score() -> None:
     st.caption("Hover over the (?) next to each criterion to see what 0, 1 and 2 mean. Scores are never pre-filled or automated.")
     with st.expander("Scoring rubric"):
         st.table(pd.DataFrame([{"Criterion": c["label"], "0": c["guide"][0], "1": c["guide"][1], "2": c["guide"][2]} for c in ev.CRITERIA]))
-    evaluator = st.text_input("Evaluator name or ID *", key=f"evaluator_{rid}", max_chars=40)
+    evaluator = st.session_state["auth_uid"]
+    st.caption("Scores attributed to your authenticated evaluator ID.")
     reviewer = st.selectbox("Human reviewer being scored", reviewers, key=f"reviewer_sel_{rid}")
     a, h = st.columns(2)
     with a:
@@ -520,7 +527,7 @@ def tab_score() -> None:
                 db.save_evaluation(rid, "human", reviewer, evaluator, ev.validate_scores(hu_scores), notes)
                 st.success(f"Saved. AI total {sum(ai_scores.values())}/10 · Human total {sum(hu_scores.values())}/10.")
             except Exception as exc:  # noqa: BLE001
-                st.error(f"Could not save scores: {exc}")
+                st.error("Could not save scores. Check database configuration.")
 
 
 def tab_aggregate() -> None:
@@ -581,18 +588,60 @@ def page_compare() -> None:
 
 # ----------------------------------------------------------------------------- main
 def main() -> None:
-    st.markdown(CSS, unsafe_allow_html=True)
-    init_state()
+    # Streamlit Secrets are read only on the server. Never render their values.
     try:
-        db.init_db()
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Database error: {exc}")
-        st.stop()
-    page = sidebar()
-    {PAGES[0]: page_home, PAGES[1]: page_career, PAGES[2]: page_analyzer,
-     PAGES[3]: page_human, PAGES[4]: page_compare}[page]()
-    st.divider()
-    st.caption("Academic prototype. AI output can be inaccurate: always review it critically. Do not upload resumes you are not allowed to share.")
+        for key in ('GEMINI_API_KEY','GEMINI_MODEL','DATABASE_URL','APP_ENV','AI_DAILY_USER_LIMIT','AI_DAILY_GLOBAL_LIMIT'):
+            value=st.secrets.get(key)
+            if value is not None: os.environ[key]=str(value)
+    except (FileNotFoundError, KeyError):
+        pass
+    except Exception as exc:
+        if 'not found' not in str(exc).lower() and 'no secrets' not in str(exc).lower():
+            st.error('Invalid server secrets configuration.'); return
+    st.markdown(CSS+STYLE, unsafe_allow_html=True)
+    try:
+        actor=login_gate()
+    except Exception:
+        st.error("Account database unavailable. Check configuration."); return
+    if not actor: return
+    init_state()
+    role=actor['role']
+    target=None
+    if role!='student':
+        with st.sidebar:
+            options={u['id']:u['name']+' · '+u['id'][:8] for u in accounts.users(actor) if u['role']=='student' and u['shared']}
+            if role=='admin': options={'legacy':'Legacy local research records',**options}
+            if not options:
+                st.info("No student has shared a review workspace yet.")
+                if st.button("Sign out"): signout()
+                return
+            target=st.selectbox("Review workspace",list(options),format_func=options.get)
+            if st.session_state.get('selected_workspace')!=target:
+                clear_resume(); st.session_state.selected_workspace=target
+    pages=([PAGES[0],PAGES[1],PAGES[2]]+EXTRA if role=='student' else [PAGES[3]] if role=='reviewer' else ['Admin dashboard',PAGES[4]])
+    try:
+        with accounts.authorized_workspace(actor,target):
+            db.init_db()
+            page=sidebar(actor,pages)
+            ai=get_ai()
+            if role=='student' and page in [PAGES[1],PAGES[2],"Mock Interview"] and ai.live:
+                if not st.checkbox("I consent to sending the information I enter on this page to Google Gemini for AI processing.",key='consent_'+page):
+                    st.info("Consent is required for live AI. You can use offline demo mode instead."); return
+            routes={PAGES[0]:lambda:page_home(actor,pages),PAGES[1]:lambda:page_career(actor),PAGES[2]:page_analyzer,PAGES[3]:page_human,PAGES[4]:page_compare,
+                    'ATS Checker':lambda:tools.page_match(actor,True),'Job Matcher':lambda:tools.page_match(actor),'Skill Gap':lambda:tools.page_gap(actor),'Learning Roadmap':lambda:tools.page_roadmap(actor),'Mock Interview':lambda:tools.page_interview(actor,ai),'Resume Builder':lambda:tools.page_builder(actor,ai),'Learning Resources':tools.page_courses,'My Profile':lambda:tools.page_profile(actor),'My History':lambda:tools.page_history(actor,db)}
+            if page=='Admin dashboard':
+                hero("Administration", "Account directory and selected workspace statistics")
+                members=accounts.users(actor); st.metric('Registered students',sum(u['role']=='student' for u in members))
+                q=st.text_input('Search account names'); filtered=[u for u in members if q.lower() in u['name'].lower()]; st.dataframe(pd.DataFrame(filtered),hide_index=True)
+                st.subheader('Selected workspace'); stats=db.counts()
+                for col,(k,v) in zip(st.columns(4),stats.items()): col.metric(k.replace('_',' ').title(),v)
+                st.bar_chart(pd.Series(stats)); st.caption('Workspace counts are not site-wide totals. Student sharing is opt-in.')
+            else: routes[page]()
+    except PermissionError:
+        st.error('Access denied. Sign in again or select an authorized workspace.')
+    except Exception:
+        st.error('This operation could not be completed. Check the local configuration and try again. No secret values are shown.')
+    st.divider(); st.caption("Academic prototype. AI output may be inaccurate. Do not upload resumes without permission.")
 
-
-main()
+if __name__ == '__main__':
+    main()

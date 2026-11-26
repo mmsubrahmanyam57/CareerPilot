@@ -59,7 +59,7 @@ def _friendly_error(exc: Exception | None) -> str:
         return "Gemini is temporarily overloaded or unavailable. Please retry shortly."
     if any(word in msg.lower() for word in ("connect", "timeout", "resolve", "network")):
         return "Could not reach the Gemini service. Check your internet connection."
-    return f"Gemini request failed: {msg[:300]}"
+    return "Gemini request failed. Check model configuration and service availability."
 
 
 def parse_json_response(text: str) -> dict[str, Any]:
@@ -79,11 +79,12 @@ class AIService:
     """Gemini client plus the demo-mode switch."""
 
     def __init__(self, model: str | None = None, demo_mode: bool = False,
-                 api_key: str | None = None) -> None:
+                 api_key: str | None = None, request_guard=None) -> None:
         self.model = (model or get_default_model()).strip()
         self.demo_mode = demo_mode
         self._api_key = get_api_key() if api_key is None else api_key.strip()
         self._client: Any = None
+        self._request_guard = request_guard
 
     # ------------------------------------------------------------------ status
     @property
@@ -115,6 +116,9 @@ class AIService:
 
     def _call(self, contents: Any, system_instruction: str, temperature: float,
               json_mode: bool, max_retries: int = 3) -> str:
+        if self._request_guard:
+            try: self._request_guard()
+            except (ValueError, PermissionError) as exc: raise AIServiceError(str(exc)) from exc
         client = self._get_client()
         kwargs: dict[str, Any] = {"system_instruction": system_instruction, "temperature": temperature}
         if json_mode:
