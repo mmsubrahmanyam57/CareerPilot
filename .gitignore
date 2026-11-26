@@ -1,0 +1,29 @@
+# Secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Database
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+
+# Private resumes and logs
+*.pdf
+*.log
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
